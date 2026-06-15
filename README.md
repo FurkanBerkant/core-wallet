@@ -8,6 +8,8 @@ A Spring Boot-based wallet management system that enables users to create accoun
 - **Deposit Transactions**: Add funds to an account
 - **Withdraw Transactions**: Remove funds from an account with balance validation
 - **Fund Transfers**: Transfer money between accounts with automatic balance updates
+- **Idempotency Keys**: Safely retry deposits, withdrawals, and transfers without double-charging
+- **Concurrency Protection**: Use database row locks for balance-changing operations to reduce double-spending risk
 - **Transaction Ledger**: Maintain a complete history of all transactions organized by account
 - **Error Handling**: Comprehensive exception handling for invalid operations (insufficient balance, account not found)
 - **RESTful API**: Clean and intuitive REST endpoints for all operations
@@ -21,7 +23,7 @@ A Spring Boot-based wallet management system that enables users to create accoun
 - **Maven**
 - **Docker & Docker Compose**
 - **JUnit 5**
-- **Mockito**
+- **H2 Database** (test runtime)
 
 ## How to Run
 
@@ -90,6 +92,8 @@ A Spring Boot-based wallet management system that enables users to create accoun
 - `POST /api/accounts/transfer` - Transfer funds between accounts
 - `GET /api/accounts/{id}/ledger` - Get transaction history for an account
 
+For `deposit`, `withdraw`, and `transfer`, clients can send an optional `Idempotency-Key` header. Reusing the same key with the same request replays the stored result; reusing it with a different request returns `409 Conflict`.
+
 ## Project Structure
 
 ```
@@ -103,4 +107,3 @@ src/
 │   └── exception/      # Custom exceptions
 └── test/java/          # Unit and integration tests
 ```
-

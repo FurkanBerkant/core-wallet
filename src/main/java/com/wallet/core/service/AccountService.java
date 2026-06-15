@@ -9,6 +9,7 @@ import com.wallet.core.model.LedgerEntry;
 import com.wallet.core.model.LedgerType;
 import com.wallet.core.repository.AccountRepository;
 import com.wallet.core.repository.LedgerEntryRepository;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,15 +18,11 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 @Service
+@RequiredArgsConstructor
 public class AccountService {
 
     private final AccountRepository accountRepository;
     private final LedgerEntryRepository ledgerEntryRepository;
-
-    public AccountService(AccountRepository accountRepository, LedgerEntryRepository ledgerEntryRepository) {
-        this.accountRepository = accountRepository;
-        this.ledgerEntryRepository = ledgerEntryRepository;
-    }
 
     @Transactional
     public AccountDto createAccount(String username, BigDecimal initialBalance) {
@@ -43,7 +40,7 @@ public class AccountService {
 
     @Transactional
     public AccountDto deposit(Long id, BigDecimal amount) {
-        Account account = accountRepository.findById(id)
+        Account account = accountRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new AccountNotFoundException("Account not found with id: " + id));
 
         account.setBalance(account.getBalance().add(amount));
@@ -57,7 +54,7 @@ public class AccountService {
 
     @Transactional
     public AccountDto withdraw(Long id, BigDecimal amount) {
-        Account account = accountRepository.findById(id)
+        Account account = accountRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new AccountNotFoundException("Account not found with id: " + id));
 
         if (account.getBalance().compareTo(amount) < 0) {
@@ -75,11 +72,20 @@ public class AccountService {
 
     @Transactional
     public void transfer(Long fromId, Long toId, BigDecimal amount) {
-        Account fromAccount = accountRepository.findById(fromId)
-                .orElseThrow(() -> new AccountNotFoundException("Source account not found with id: " + fromId));
+        Account fromAccount;
+        Account toAccount;
 
-        Account toAccount = accountRepository.findById(toId)
-                .orElseThrow(() -> new AccountNotFoundException("Destination account not found with id: " + toId));
+        if (fromId < toId) {
+            fromAccount = accountRepository.findByIdForUpdate(fromId)
+                    .orElseThrow(() -> new AccountNotFoundException("Source account not found with id: " + fromId));
+            toAccount = accountRepository.findByIdForUpdate(toId)
+                    .orElseThrow(() -> new AccountNotFoundException("Destination account not found with id: " + toId));
+        } else {
+            toAccount = accountRepository.findByIdForUpdate(toId)
+                    .orElseThrow(() -> new AccountNotFoundException("Destination account not found with id: " + toId));
+            fromAccount = accountRepository.findByIdForUpdate(fromId)
+                    .orElseThrow(() -> new AccountNotFoundException("Source account not found with id: " + fromId));
+        }
 
         if (fromAccount.getBalance().compareTo(amount) < 0) {
             throw new InsufficientBalanceException("Insufficient balance");
@@ -87,14 +93,14 @@ public class AccountService {
 
         // Withdraw from source
         fromAccount.setBalance(fromAccount.getBalance().subtract(amount));
-        Account updatedFromAccount = accountRepository.save(fromAccount);
+        accountRepository.save(fromAccount);
 
         LedgerEntry fromEntry = new LedgerEntry(fromId, amount, LedgerType.TRANSFER, LocalDateTime.now());
         ledgerEntryRepository.save(fromEntry);
 
         // Deposit to destination
         toAccount.setBalance(toAccount.getBalance().add(amount));
-        Account updatedToAccount = accountRepository.save(toAccount);
+        accountRepository.save(toAccount);
 
         LedgerEntry toEntry = new LedgerEntry(toId, amount, LedgerType.TRANSFER, LocalDateTime.now());
         ledgerEntryRepository.save(toEntry);

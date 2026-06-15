@@ -30,7 +30,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest
+@SpringBootTest(properties = {
+        "spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration"
+})
 @AutoConfigureMockMvc
 class AccountControllerTest {
 
@@ -43,14 +45,40 @@ class AccountControllerTest {
     @Autowired
     private LedgerEntryRepository ledgerEntryRepository;
 
+    @org.springframework.boot.test.mock.mockito.MockBean
+    private org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
+
+    private org.springframework.data.redis.core.ValueOperations<String, String> valueOperations;
+
     @Autowired
     private ObjectMapper objectMapper;
 
+    private final java.util.Map<String, String> redisCache = new java.util.concurrent.ConcurrentHashMap<>();
+
     @BeforeEach
     void setUp() {
+        redisCache.clear();
+        valueOperations = org.mockito.Mockito.mock(org.springframework.data.redis.core.ValueOperations.class);
+
+        org.mockito.Mockito.when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        org.mockito.Mockito.when(valueOperations.get(org.mockito.Mockito.anyString()))
+                .thenAnswer(invocation -> {
+                    String key = invocation.getArgument(0);
+                    return redisCache.get(key);
+                });
+
+        org.mockito.Mockito.doAnswer(invocation -> {
+            String key = invocation.getArgument(0);
+            String value = invocation.getArgument(1);
+            redisCache.put(key, value);
+            return null;
+        }).when(valueOperations).set(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(java.time.Duration.class));
+
         ledgerEntryRepository.deleteAll();
         accountRepository.deleteAll();
     }
+
 
     @Test
     void shouldCreateAccountSuccessfully() throws Exception {
@@ -104,6 +132,54 @@ class AccountControllerTest {
         assertEquals(savedAccount.getId(), entry.getAccountId());
         assertEquals(0, new BigDecimal("50.00").compareTo(entry.getAmount()));
         assertEquals(LedgerType.DEPOSIT, entry.getType());
+    }
+
+    @Test
+    void shouldReplayDepositWhenIdempotencyKeyIsReused() throws Exception {
+        Account account = new Account("idempotent_deposit_user", new BigDecimal("100.00"));
+        Account savedAccount = accountRepository.save(account);
+
+        TransactionRequest request = new TransactionRequest(new BigDecimal("50.00"));
+
+        mockMvc.perform(post("/api/accounts/{id}/deposit", savedAccount.getId())
+                        .header("Idempotency-Key", "deposit-key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance", is(150.00)));
+
+        mockMvc.perform(post("/api/accounts/{id}/deposit", savedAccount.getId())
+                        .header("Idempotency-Key", "deposit-key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance", is(150.00)));
+
+        Account updatedAccount = accountRepository.findById(savedAccount.getId()).orElseThrow();
+        assertEquals(0, new BigDecimal("150.00").compareTo(updatedAccount.getBalance()));
+        assertEquals(1, ledgerEntryRepository.findAll().size());
+    }
+
+    @Test
+    void shouldReturn409WhenIdempotencyKeyIsReusedForDifferentRequest() throws Exception {
+        Account account = new Account("idempotency_conflict_user", new BigDecimal("100.00"));
+        Account savedAccount = accountRepository.save(account);
+
+        mockMvc.perform(post("/api/accounts/{id}/deposit", savedAccount.getId())
+                        .header("Idempotency-Key", "same-key-different-body")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new TransactionRequest(new BigDecimal("50.00")))))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/accounts/{id}/deposit", savedAccount.getId())
+                        .header("Idempotency-Key", "same-key-different-body")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new TransactionRequest(new BigDecimal("60.00")))))
+                .andExpect(status().isConflict());
+
+        Account updatedAccount = accountRepository.findById(savedAccount.getId()).orElseThrow();
+        assertEquals(0, new BigDecimal("150.00").compareTo(updatedAccount.getBalance()));
+        assertEquals(1, ledgerEntryRepository.findAll().size());
     }
 
     @Test
@@ -183,6 +259,33 @@ class AccountControllerTest {
                 .orElseThrow();
         assertEquals(0, new BigDecimal("75.00").compareTo(toEntry.getAmount()));
         assertEquals(LedgerType.TRANSFER, toEntry.getType());
+    }
+
+    @Test
+    void shouldReplayTransferWhenIdempotencyKeyIsReused() throws Exception {
+        Account fromAccount = accountRepository.save(new Account("idempotent_from_user", new BigDecimal("200.00")));
+        Account toAccount = accountRepository.save(new Account("idempotent_to_user", new BigDecimal("50.00")));
+
+        TransferRequest request = new TransferRequest(fromAccount.getId(), toAccount.getId(), new BigDecimal("75.00"));
+
+        mockMvc.perform(post("/api/accounts/transfer")
+                        .header("Idempotency-Key", "transfer-key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/accounts/transfer")
+                        .header("Idempotency-Key", "transfer-key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk());
+
+        Account updatedFrom = accountRepository.findById(fromAccount.getId()).orElseThrow();
+        Account updatedTo = accountRepository.findById(toAccount.getId()).orElseThrow();
+
+        assertEquals(0, new BigDecimal("125.00").compareTo(updatedFrom.getBalance()));
+        assertEquals(0, new BigDecimal("125.00").compareTo(updatedTo.getBalance()));
+        assertEquals(2, ledgerEntryRepository.findAll().size());
     }
 
     @Test
